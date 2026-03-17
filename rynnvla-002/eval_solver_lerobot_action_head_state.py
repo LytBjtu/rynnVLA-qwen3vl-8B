@@ -82,7 +82,7 @@ class Solver(PretrainSolverBase):
     def _model_func(
         self,
         init_from: str,
-    ) -> tuple[ChameleonXLLMXForConditionalGeneration_ck_action_head, None]:
+    ) -> tuple[object, None]:
 
         # Only instantiate the model on rank0
         # Other ranks will receive the model weights from rank0 during FSDP wrapping (through `sync_module_states`)
@@ -100,6 +100,8 @@ class Solver(PretrainSolverBase):
             "7B": "Alpha-VLLM/Chameleon_7B_mGPT",
             "34B": "Alpha-VLLM/Chameleon_34B_mGPT",
         }[self.args.model_size]
+
+        from model.modeling_xllmx_chameleon_ck_action_head import ChameleonXLLMXForConditionalGeneration_ck_action_head
 
         model = ChameleonXLLMXForConditionalGeneration_ck_action_head.from_pretrained(
             pretrained_name,

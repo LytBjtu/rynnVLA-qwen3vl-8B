@@ -88,6 +88,8 @@ class Solver(PretrainSolverBase_ck_action_head):
             "34B": "Alpha-VLLM/Chameleon_34B_mGPT",
         }[self.args.model_size]
 
+        from model.modeling_xllmx_chameleon_ck_action_head import ChameleonXLLMXForConditionalGeneration_ck_action_head
+
         model = ChameleonXLLMXForConditionalGeneration_ck_action_head.from_pretrained(
             pretrained_name,
             max_position_embeddings=self.args.max_seq_len,

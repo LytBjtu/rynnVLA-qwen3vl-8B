@@ -6,7 +6,7 @@ import torch
 from PIL import Image
 from transformers import GenerationConfig
 
-from model import Qwen3VLXLLMXForConditionalGeneration_ck_action_head
+from model.modeling_xllmx_qwen3_vl_ck_action_head import Qwen3VLXLLMXForConditionalGeneration_ck_action_head
 
 
 def parse_args() -> argparse.Namespace:
