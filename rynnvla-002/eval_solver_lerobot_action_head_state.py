@@ -1,15 +1,11 @@
 import pickle
 from typing import List, Tuple
 
-from accelerate import init_empty_weights
 import torch
 import numpy as np
 
-from model import (
-    ChameleonXLLMXConfig,
-    ChameleonXLLMXForConditionalGeneration_ck_action_head,
-    Qwen3VLXLLMXForConditionalGeneration_ck_action_head,
-)
+from model import ChameleonXLLMXForConditionalGeneration_ck_action_head
+from model.vla_model_factory import build_vla_action_model
 from xllmx.solvers.pretrain import PretrainSolverBase
 
 import tqdm
@@ -47,11 +43,6 @@ class Solver(PretrainSolverBase):
         self.model, _ = self._model_func(self.args.resume_path)
         DEVICE = torch.device(f"cuda:{self.args.device}")
         self.model = self.model.to(DEVICE)
-        if self.args.vlm_arch == "qwen3_vl":
-            self.model.setup_action_tokens(
-                action_start_token=self.args.action_start_token,
-                action_end_token=self.args.action_end_token,
-            )
         self.model.eval()
         print('init done!')
 
@@ -97,31 +88,7 @@ class Solver(PretrainSolverBase):
         # Other ranks will receive the model weights from rank0 during FSDP wrapping (through `sync_module_states`)
         # See https://github.com/pytorch/pytorch/issues/105840
 
-        if self.args.vlm_arch == "qwen3_vl":
-            model_path = self.args.qwen_model_path or init_from
-            if not model_path:
-                raise ValueError("qwen3_vl requires --qwen_model_path or --resume_path")
-
-            model = Qwen3VLXLLMXForConditionalGeneration_ck_action_head.from_pretrained(
-                model_path,
-                action_dim=self.args.action_dim,
-                time_horizon=self.args.time_horizon,
-                dtype=torch.bfloat16,
-                device_map="cpu",
-            )
-        else:
-            model = ChameleonXLLMXForConditionalGeneration_ck_action_head.from_pretrained(
-                init_from,
-                action_dim=self.args.action_dim,
-                time_horizon=self.args.time_horizon,
-                max_position_embeddings=self.args.max_seq_len,
-                mask_image_logits=self.args.mask_image_logits,
-                dropout=self.args.dropout,
-                z_loss_weight=self.args.z_loss_weight,
-                dtype=torch.bfloat16,
-                device_map="cpu",
-            )
-
+        model, _ = build_vla_action_model(self.args, init_from, dp_rank=0)
         return model, None
 
     def _item_processor_func(self) -> ItemProcessor:
