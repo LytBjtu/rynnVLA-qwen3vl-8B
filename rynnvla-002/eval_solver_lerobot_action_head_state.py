@@ -4,6 +4,7 @@ from typing import List, Tuple
 import torch
 import numpy as np
 
+from model import ChameleonXLLMXForConditionalGeneration_ck_action_head
 from model.vla_model_factory import build_vla_action_model
 from xllmx.solvers.pretrain import PretrainSolverBase
 
