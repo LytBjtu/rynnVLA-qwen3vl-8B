@@ -5,6 +5,9 @@ from enum import Enum
 from packaging import version
 from typing import Any, List, Optional, Union, Dict
 
+from .utils.deepspeed_compat import patch_torch_elastic_for_deepspeed
+
+patch_torch_elastic_for_deepspeed()
 import deepspeed
 import json
 import torch
