@@ -3,6 +3,10 @@ from __future__ import annotations
 import torch
 from accelerate import init_empty_weights
 
+from .configuration_xllmx_chameleon import ChameleonXLLMXConfig
+from .modeling_xllmx_chameleon_ck_action_head import ChameleonXLLMXForConditionalGeneration_ck_action_head
+from .modeling_xllmx_qwen3_vl_ck_action_head import Qwen3VLXLLMXForConditionalGeneration_ck_action_head
+
 
 def build_vla_action_model(args, init_from: str, dp_rank: int = 0):
     """Build VLA action model for both training/eval with minimal branching.
@@ -11,8 +15,6 @@ def build_vla_action_model(args, init_from: str, dp_rank: int = 0):
     - qwen3_vl: reuse Qwen3-VL pretrained model + action head wrapper.
     """
     if args.vlm_arch == "qwen3_vl":
-        from .modeling_xllmx_qwen3_vl_ck_action_head import Qwen3VLXLLMXForConditionalGeneration_ck_action_head
-
         model_path = args.qwen_model_path or init_from
         if not model_path:
             raise ValueError("qwen3_vl requires --qwen_model_path or --init_from/--resume_path")
@@ -29,9 +31,6 @@ def build_vla_action_model(args, init_from: str, dp_rank: int = 0):
             action_end_token=args.action_end_token,
         )
         return model, None
-
-    from .configuration_xllmx_chameleon import ChameleonXLLMXConfig
-    from .modeling_xllmx_chameleon_ck_action_head import ChameleonXLLMXForConditionalGeneration_ck_action_head
 
     if dp_rank == 0:
         model = ChameleonXLLMXForConditionalGeneration_ck_action_head.from_pretrained(

@@ -2,13 +2,10 @@ import pickle
 from pathlib import Path
 from typing import List, Tuple
 
-from path_setup import ensure_repo_root_on_path
-
-REPO_ROOT = ensure_repo_root_on_path()
-
 import torch
 import numpy as np
 
+from model import ChameleonXLLMXForConditionalGeneration_ck_action_head
 from model.vla_model_factory import build_vla_action_model
 from xllmx.solvers.pretrain import PretrainSolverBase
 

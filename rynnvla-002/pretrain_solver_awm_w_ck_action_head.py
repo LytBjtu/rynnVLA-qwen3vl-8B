@@ -1,12 +1,9 @@
 import pickle
 from typing import List, Tuple
 
-from path_setup import ensure_repo_root_on_path
-
-REPO_ROOT = ensure_repo_root_on_path()
-
 import torch
 
+from model import ChameleonXLLMXForConditionalGeneration_ck_action_head
 from model.vla_model_factory import build_vla_action_model
 from xllmx.data.item_processor import ItemProcessorBase
 from xllmx.solvers.pretrain import PretrainSolverBase_ck_action_head
@@ -70,7 +67,7 @@ class Solver(PretrainSolverBase_ck_action_head):
     def _model_func(
         self,
         init_from: str,
-    ) -> tuple[object, None]:
+    ) -> (ChameleonXLLMXForConditionalGeneration_ck_action_head, None):
 
         # 统一走模型工厂，尽量复用 qwen3vl/chameleon 的加载逻辑。
         model, _ = build_vla_action_model(self.args, init_from, dp_rank=self.dp_rank)
