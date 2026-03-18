@@ -1,10 +1,10 @@
 import torch
 import torch.nn as nn
-from transformers import Qwen3VLForConditionalGeneration, AutoProcessor
+from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
 from typing import List
 
-# 直接复用你现有 ActionHead
 from .modeling_xllmx_chameleon_ck_action_head import ActionHead
+
 
 class Qwen3VLXLLMXForConditionalGeneration_ck_action_head(Qwen3VLForConditionalGeneration):
     def __init__(self, config, action_dim=7, time_horizon=5):
@@ -84,89 +84,89 @@ class Qwen3VLXLLMXForConditionalGeneration_ck_action_head(Qwen3VLForConditionalG
             labels_action[i] = labels_c[batch, start:start + self.action_dim]
         return labels_action, sequences
 
+    def _get_pad_token_id(self):
+        pad_token_id = self.config.pad_token_id
+        if pad_token_id is None and self.processor is not None:
+            pad_token_id = self.processor.tokenizer.pad_token_id
+        if pad_token_id is None:
+            pad_token_id = self.config.eos_token_id if self.config.eos_token_id is not None else 0
+        return pad_token_id
+
     def forward(self, input_ids=None, labels=None, training=False, att_mask=True, **kwargs):
         if not training:
             return Qwen3VLForConditionalGeneration.forward(self, input_ids=input_ids, labels=labels, **kwargs)
 
-        # 处理input_ids和labels，确保长度一致
-        max_tokens = max(len(x) for x in input_ids)
-        
-        # Qwen3VL模型可能没有max_position_embeddings属性，需要检查并处理
-        # 尝试从文本配置中获取最大位置嵌入
-        if hasattr(self.config, 'max_position_embeddings'):
-            max_pos_embeddings = self.config.max_position_embeddings
-        elif hasattr(self.config, 'text_config') and hasattr(self.config.text_config, 'max_position_embeddings'):
-            max_pos_embeddings = self.config.text_config.max_position_embeddings
-        else:
-            # 如果都没有，则使用一个默认值
-            max_pos_embeddings = 32768  # Qwen模型通常使用较大的上下文长度
-            
-        max_tokens = min(max_tokens, max_pos_embeddings)
-        
-        # 截断或填充input_ids和labels到相同长度
-        processed_input_ids = []
-        processed_labels = []
-        for example, label in zip(input_ids, labels):
-            # 截断到最大长度
-            truncated_example = example[:max_tokens]
-            truncated_label = label[:max_tokens]
-            
-            # 填充到最大长度
-            padded_example = truncated_example + [0] * (max_tokens - len(truncated_example))
-            padded_label = truncated_label + [-100] * (max_tokens - len(truncated_label))
-            
-            processed_input_ids.append(padded_example)
-            processed_labels.append(padded_label)
+        device = next(self.parameters()).device
+        pixel_values = kwargs.pop("pixel_values", None)
+        image_grid_thw = kwargs.pop("image_grid_thw", None)
+        attention_mask = kwargs.pop("attention_mask", None)
+        modalities = kwargs.pop("modalities", None)
 
-        input_ids = torch.tensor(processed_input_ids, dtype=torch.int64, device=self.device)
-        labels = torch.tensor(processed_labels, dtype=torch.int64, device=self.device)
-        
-        # 构建合适的attention mask，确保适用于Qwen3VL
-        if att_mask:
-            # 创建有效的attention mask，确保不会导致cumsum后越界
-            attention_mask = (input_ids != 0).long()
-            
-            # 确保在任何地方都不会有导致cumsum结果过大的情况
-            # 这对于Qwen3VL的RoPE索引计算很重要
+        if torch.is_tensor(input_ids):
+            input_ids = input_ids.to(device=device, dtype=torch.long)
+            labels = labels.to(device=device, dtype=torch.long) if labels is not None else None
+            if attention_mask is None and att_mask:
+                attention_mask = (input_ids != self._get_pad_token_id()).long()
         else:
-            attention_mask = None
+            max_tokens = max(len(x) for x in input_ids)
+            if hasattr(self.config, "max_position_embeddings"):
+                max_pos_embeddings = self.config.max_position_embeddings
+            elif hasattr(self.config, "text_config") and hasattr(self.config.text_config, "max_position_embeddings"):
+                max_pos_embeddings = self.config.text_config.max_position_embeddings
+            else:
+                max_pos_embeddings = 32768
+            max_tokens = min(max_tokens, max_pos_embeddings)
 
-        # 重要：确保其他Qwen3VL模型需要的参数也被正确处理
-        # 检查kwargs中是否包含position_ids，如果没有且需要的话，我们可以创建它们
-        if 'pixel_values' not in kwargs:
-            # 如果没有像素值，确保只使用文本相关的输入
-            result = Qwen3VLForConditionalGeneration.forward(
-                self,
-                input_ids=input_ids,
-                labels=labels,
-                attention_mask=attention_mask,
-                use_cache=False,
-                output_hidden_states=kwargs.get("output_hidden_states", False),
-                return_dict=False,  # 避免返回字典格式的冲突
-                **{k: v for k, v in kwargs.items() if k != "output_hidden_states"},
+            pad_token_id = self._get_pad_token_id()
+            processed_input_ids = []
+            processed_labels = []
+            for example, label in zip(input_ids, labels):
+                truncated_example = example[:max_tokens]
+                truncated_label = label[:max_tokens]
+                padded_example = truncated_example + [pad_token_id] * (max_tokens - len(truncated_example))
+                padded_label = truncated_label + [-100] * (max_tokens - len(truncated_label))
+                processed_input_ids.append(padded_example)
+                processed_labels.append(padded_label)
+
+            input_ids = torch.tensor(processed_input_ids, dtype=torch.long, device=device)
+            labels = torch.tensor(processed_labels, dtype=torch.long, device=device)
+            attention_mask = (input_ids != pad_token_id).long() if att_mask else None
+
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(device=device, dtype=torch.long)
+        if pixel_values is not None:
+            pixel_values = pixel_values.to(device=device)
+        if image_grid_thw is not None:
+            image_grid_thw = image_grid_thw.to(device=device, dtype=torch.long)
+
+        image_token_id = getattr(self.config, "image_token_id", None)
+        if image_token_id is not None and pixel_values is None and (input_ids == image_token_id).any():
+            raise ValueError(
+                "Qwen3-VL training input contains image placeholder tokens, but pixel_values/image_grid_thw "
+                "were not provided. Please build Qwen batches with the processor so vision inputs are passed "
+                "together with input_ids."
             )
-        else:
-            # 如果有像素值，使用完整参数调用
-            result = Qwen3VLForConditionalGeneration.forward(
-                self,
-                input_ids=input_ids,
-                pixel_values=kwargs.get('pixel_values', None),
-                image_grid_thw=kwargs.get('image_grid_thw', None),
-                modalities=kwargs.get('modalities', None),
-                labels=labels,
-                attention_mask=attention_mask,
-                use_cache=False,
-                output_hidden_states=kwargs.get("output_hidden_states", False),
-                return_dict=False,
-                **{k: v for k, v in kwargs.items() if k not in ["output_hidden_states", "pixel_values", "image_grid_thw", "modalities"]},
-            )
+
+        result = Qwen3VLForConditionalGeneration.forward(
+            self,
+            input_ids=input_ids,
+            pixel_values=pixel_values,
+            image_grid_thw=image_grid_thw,
+            modalities=modalities,
+            labels=labels,
+            attention_mask=attention_mask,
+            use_cache=False,
+            output_hidden_states=kwargs.get("output_hidden_states", False),
+            return_dict=True,
+            **kwargs,
+        )
 
         c_loss = result.loss
         logits = result.logits
         additional_loss_dict = {}
 
         hidden_states = None
-        predicted_actions = torch.empty(0, self.action_dim, device=self.device)
+        predicted_actions = torch.empty(0, self.action_dim, device=device)
         loss_ct = c_loss * 0
 
         if kwargs.get("output_hidden_states", False):
@@ -199,7 +199,7 @@ class Qwen3VLXLLMXForConditionalGeneration_ck_action_head(Qwen3VLForConditionalG
             output_hidden_states=True,
         )
         full_input_ids = out.sequences
-        step_hs = [s[-1] for s in out.hidden_states]  # 每步最后一层
+        step_hs = [s[-1] for s in out.hidden_states]
         hidden_states = torch.cat(step_hs, dim=1)
 
         predicted_actions, ok = self.action_head(

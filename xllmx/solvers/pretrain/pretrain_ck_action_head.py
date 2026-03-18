@@ -902,9 +902,14 @@ class PretrainSolverBase_ck_action_head(ABC):
         end_token = getattr(self.args, "action_end_token", "<|action_end|>")
         start_token_id = tok.convert_tokens_to_ids(start_token)
         end_token_id = tok.convert_tokens_to_ids(end_token)
+        pad_token_id = tok.pad_token_id if tok.pad_token_id is not None else (tok.eos_token_id if tok.eos_token_id is not None else 0)
+        max_seq_len = getattr(self.args, "max_seq_len", None)
 
-        examples = []
-        labels = []
+        input_ids_list = []
+        labels_list = []
+        attention_mask_list = []
+        pixel_values_list = []
+        image_grid_thw_list = []
 
         for conv, img, act, sta in zip(conversations, images, actions, states):
             user_prompt = conv[0]["value"] if len(conv) > 0 and "value" in conv[0] else "What action should the robot take?"
@@ -913,7 +918,6 @@ class PretrainSolverBase_ck_action_head(ABC):
                 user_prompt = f"{user_prompt} State: {np.array(sta).reshape(-1).tolist()}."
 
             cur_images = list(img) if isinstance(img, list) else [img]
-            # Use the latest front/wrist views when available.
             if len(cur_images) >= 2:
                 qwen_images = [cur_images[-2], cur_images[-1]]
             else:
@@ -926,17 +930,50 @@ class PretrainSolverBase_ck_action_head(ABC):
 
             qwen_conv = [{"role": "user", "content": content}]
             prompt = processor.apply_chat_template(qwen_conv, tokenize=False, add_generation_prompt=True)
-            prompt_ids = processor.tokenizer(prompt, add_special_tokens=False)["input_ids"]
+            encoded = processor(text=[prompt], images=qwen_images, return_tensors="pt")
+
+            prompt_input_ids = encoded["input_ids"][0].long()
+            prompt_attention_mask = encoded["attention_mask"][0].long()
 
             gt_action = act[0] if isinstance(act, list) and len(act) > 0 else act
-            action_ids = self._encode_action_tokens_qwen(gt_action, start_token_id, end_token_id)
+            action_ids = torch.tensor(
+                self._encode_action_tokens_qwen(gt_action, start_token_id, end_token_id),
+                dtype=torch.long,
+            )
+            action_attention_mask = torch.ones_like(action_ids)
+            action_labels = action_ids.clone()
 
-            ex = prompt_ids + action_ids
-            lb = [-100] * len(prompt_ids) + action_ids
-            examples.append(ex)
-            labels.append(lb)
+            full_input_ids = torch.cat([prompt_input_ids, action_ids], dim=0)
+            full_labels = torch.cat([
+                torch.full_like(prompt_input_ids, -100),
+                action_labels,
+            ], dim=0)
+            full_attention_mask = torch.cat([prompt_attention_mask, action_attention_mask], dim=0)
 
-        return examples, labels
+            if max_seq_len is not None and full_input_ids.shape[0] > max_seq_len:
+                raise ValueError(
+                    f"Qwen3-VL sample length {full_input_ids.shape[0]} exceeds max_seq_len={max_seq_len}. "
+                    "Please shorten the prompt or images instead of truncating, because truncation would break "
+                    "the alignment between image tokens and image_grid_thw."
+                )
+
+            input_ids_list.append(full_input_ids)
+            labels_list.append(full_labels)
+            attention_mask_list.append(full_attention_mask)
+            pixel_values_list.append(encoded["pixel_values"])
+            image_grid_thw_list.append(encoded["image_grid_thw"])
+
+        input_ids = torch.nn.utils.rnn.pad_sequence(input_ids_list, batch_first=True, padding_value=pad_token_id)
+        labels = torch.nn.utils.rnn.pad_sequence(labels_list, batch_first=True, padding_value=-100)
+        attention_mask = torch.nn.utils.rnn.pad_sequence(attention_mask_list, batch_first=True, padding_value=0)
+
+        return {
+            "input_ids": input_ids,
+            "labels": labels,
+            "attention_mask": attention_mask,
+            "pixel_values": torch.cat(pixel_values_list, dim=0),
+            "image_grid_thw": torch.cat(image_grid_thw_list, dim=0),
+        }
 
     def _prepare_examples_labels(self, batch_data):
         if len(batch_data) == 2:
@@ -972,6 +1009,22 @@ class PretrainSolverBase_ck_action_head(ABC):
 
         return examples, labels
 
+    def _prepare_model_inputs(self, batch_data):
+        prepared = self._prepare_examples_labels(batch_data)
+        if isinstance(prepared, dict):
+            return prepared
+        examples, labels = prepared
+        return {
+            "input_ids": examples,
+            "labels": labels,
+        }
+
+    def _forward_action_batch(self, batch_data, loss_weights=None):
+        model_inputs = self._prepare_model_inputs(batch_data)
+        if loss_weights is not None:
+            model_inputs["loss_weights"] = loss_weights
+        return self.model(**model_inputs, output_hidden_states=True, training=True, att_mask=True)
+
     
     def train_one_epoch_awm(
         self,
@@ -1005,8 +1058,6 @@ class PretrainSolverBase_ck_action_head(ABC):
             accum_counter = (accum_counter + 1) % accum_iter
             is_gradient_accumulation_boundary = accum_counter == 0
 
-            examples, labels = self._prepare_examples_labels(batch_data)
-
             if is_gradient_accumulation_boundary or data_iter_step == start_iter:
                 lr_sched.adjust_learning_rate_epoch(
                     self.optimizer, data_iter_step / len(self.dataloader_train) + epoch, self.args
@@ -1018,7 +1069,7 @@ class PretrainSolverBase_ck_action_head(ABC):
                 "fp32": contextlib.nullcontext(),
                 "tf32": contextlib.nullcontext(),
             }[self.args.precision]:
-                outputs = self.model(input_ids=examples, labels=labels, output_hidden_states=True, training=True, att_mask=True)
+                outputs = self._forward_action_batch(batch_data)
                 c_loss, additional_loss_dict, logits, hidden_states, labels_c, predicted_actions, loss_ct = self._unpack_model_outputs(outputs)
             if loss_ct == 0:
                 continue
@@ -1140,8 +1191,6 @@ class PretrainSolverBase_ck_action_head(ABC):
             accum_counter = (accum_counter + 1) % accum_iter
             is_gradient_accumulation_boundary = accum_counter == 0
 
-            examples, labels = self._prepare_examples_labels(batch_data)
-                        
             if is_gradient_accumulation_boundary or data_iter_step == start_iter:
                 lr_sched.adjust_learning_rate_epoch(
                     self.optimizer, data_iter_step / len(self.dataloader_train) + epoch, self.args
@@ -1153,7 +1202,7 @@ class PretrainSolverBase_ck_action_head(ABC):
                 "fp32": contextlib.nullcontext(),
                 "tf32": contextlib.nullcontext(),
             }[self.args.precision]:
-                outputs = self.model(input_ids=examples, labels=labels, output_hidden_states=True, training=True, loss_weights=loss_weights, att_mask=True)
+                outputs = self._forward_action_batch(batch_data, loss_weights=loss_weights)
                 c_loss, additional_loss_dict, logits, hidden_states, labels_c, predicted_actions, loss_ct = self._unpack_model_outputs(outputs)
 
             # if loss_ct == 0:
@@ -1350,16 +1399,13 @@ class PretrainSolverBase_ck_action_head(ABC):
             start=start_iter,
         ):
 
-            examples, labels = self._prepare_examples_labels(batch_data)
-                        
-
             with {
                 "bf16": torch.cuda.amp.autocast(dtype=torch.bfloat16),
                 "fp16": torch.cuda.amp.autocast(dtype=torch.float16),
                 "fp32": contextlib.nullcontext(),
                 "tf32": contextlib.nullcontext(),
             }[self.args.precision]:
-                outputs = self.model(input_ids=examples, labels=labels, output_hidden_states=True, training=True, att_mask=True)
+                outputs = self._forward_action_batch(batch_data)
                 c_loss, additional_loss_dict, logits, hidden_states, labels_c, predicted_actions, loss_ct = self._unpack_model_outputs(outputs)
             loss = c_loss
             for add_loss, weight in additional_loss_dict.values():
@@ -1435,16 +1481,13 @@ class PretrainSolverBase_ck_action_head(ABC):
             start=start_iter,
         ):
 
-            examples, labels = self._prepare_examples_labels(batch_data)
-                        
-
             with {
                 "bf16": torch.cuda.amp.autocast(dtype=torch.bfloat16),
                 "fp16": torch.cuda.amp.autocast(dtype=torch.float16),
                 "fp32": contextlib.nullcontext(),
                 "tf32": contextlib.nullcontext(),
             }[self.args.precision]:
-                outputs = self.model(input_ids=examples, labels=labels, output_hidden_states=True, training=True, loss_weights=loss_weights, att_mask=True)
+                outputs = self._forward_action_batch(batch_data, loss_weights=loss_weights)
                 c_loss, additional_loss_dict, logits, hidden_states, labels_c, predicted_actions, loss_ct = self._unpack_model_outputs(outputs)
             loss = c_loss
             for add_loss, weight in additional_loss_dict.values():
@@ -1518,16 +1561,13 @@ class PretrainSolverBase_ck_action_head(ABC):
             start=start_iter,
         ):
 
-            examples, labels = self._prepare_examples_labels(batch_data)
-                        
-
             with {
                 "bf16": torch.cuda.amp.autocast(dtype=torch.bfloat16),
                 "fp16": torch.cuda.amp.autocast(dtype=torch.float16),
                 "fp32": contextlib.nullcontext(),
                 "tf32": contextlib.nullcontext(),
             }[self.args.precision]:
-                outputs = self.model(input_ids=examples, labels=labels, output_hidden_states=True, training=True, att_mask=True)
+                outputs = self._forward_action_batch(batch_data)
                 c_loss, additional_loss_dict, logits, hidden_states, labels_c, predicted_actions, loss_ct = self._unpack_model_outputs(outputs)
             loss = c_loss
             for add_loss, weight in additional_loss_dict.values():
@@ -1603,16 +1643,13 @@ class PretrainSolverBase_ck_action_head(ABC):
             start=start_iter,
         ):
 
-            examples, labels = self._prepare_examples_labels(batch_data)
-                        
-
             with {
                 "bf16": torch.cuda.amp.autocast(dtype=torch.bfloat16),
                 "fp16": torch.cuda.amp.autocast(dtype=torch.float16),
                 "fp32": contextlib.nullcontext(),
                 "tf32": contextlib.nullcontext(),
             }[self.args.precision]:
-                outputs = self.model(input_ids=examples, labels=labels, output_hidden_states=True, training=True, loss_weights=loss_weights, att_mask=True)
+                outputs = self._forward_action_batch(batch_data, loss_weights=loss_weights)
                 c_loss, additional_loss_dict, logits, hidden_states, labels_c, predicted_actions, loss_ct = self._unpack_model_outputs(outputs)
             loss = c_loss
             for add_loss, weight in additional_loss_dict.values():
