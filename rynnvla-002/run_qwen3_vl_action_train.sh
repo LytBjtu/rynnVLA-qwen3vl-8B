@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
+
 # Qwen3-VL + ActionHead joint training launcher.
 #
 # Usage:
@@ -61,6 +65,7 @@ RESUME_PATH="${RESUME_PATH:-}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
 
 mkdir -p "${OUTPUT_DIR}"
+cd "${SCRIPT_DIR}"
 
 CMD=(
   torchrun
