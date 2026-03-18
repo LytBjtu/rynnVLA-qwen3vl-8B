@@ -163,6 +163,10 @@ class Qwen3VLXLLMXForConditionalGeneration_ck_action_head(Qwen3VLForConditionalG
         return predicted_actions.reshape(self.time_horizon, self.action_dim)
 
     def _get_transformer_layers(self) -> List[nn.Module]:
+        language_model = getattr(self.model, "language_model", None)
+        if language_model is not None and hasattr(language_model, "layers"):
+            return list(language_model.layers)
+
         if hasattr(self.model, "layers"):
             return list(self.model.layers)
 
@@ -179,10 +183,15 @@ class Qwen3VLXLLMXForConditionalGeneration_ck_action_head(Qwen3VLForConditionalG
             self.action_head,
         ]
 
-        if hasattr(self.model, "embed_tokens"):
+        language_model = getattr(self.model, "language_model", None)
+        if language_model is not None and hasattr(language_model, "embed_tokens"):
+            modules.append(language_model.embed_tokens)
+        elif hasattr(self.model, "embed_tokens"):
             modules.append(self.model.embed_tokens)
 
-        visual = getattr(self, "visual", None)
+        visual = getattr(self.model, "visual", None)
+        if visual is None:
+            visual = getattr(self, "visual", None)
         if isinstance(visual, nn.Module):
             modules.append(visual)
 
