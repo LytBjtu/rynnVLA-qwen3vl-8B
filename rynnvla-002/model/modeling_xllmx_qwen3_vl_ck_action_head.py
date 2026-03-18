@@ -89,7 +89,18 @@ class Qwen3VLXLLMXForConditionalGeneration_ck_action_head(Qwen3VLForConditionalG
             return Qwen3VLForConditionalGeneration.forward(self, input_ids=input_ids, labels=labels, **kwargs)
 
         max_tokens = max(len(x) for x in input_ids)
-        max_tokens = min(max_tokens, self.config.max_position_embeddings)
+        
+        # Qwen3VL模型可能没有max_position_embeddings属性，需要检查并处理
+        # 尝试从文本配置中获取最大位置嵌入
+        if hasattr(self.config, 'max_position_embeddings'):
+            max_pos_embeddings = self.config.max_position_embeddings
+        elif hasattr(self.config, 'text_config') and hasattr(self.config.text_config, 'max_position_embeddings'):
+            max_pos_embeddings = self.config.text_config.max_position_embeddings
+        else:
+            # 如果都没有，则使用一个默认值
+            max_pos_embeddings = 32768  # Qwen模型通常使用较大的上下文长度
+            
+        max_tokens = min(max_tokens, max_pos_embeddings)
         input_ids = [example[:max_tokens] for example in input_ids]
         labels = [label[:max_tokens] for label in labels]
 
