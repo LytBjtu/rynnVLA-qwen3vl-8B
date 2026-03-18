@@ -74,17 +74,28 @@ LOG_ARGS=(
 
 set -x
 
-torchrun --nnodes $WORLD_SIZE \
-    --nproc_per_node $NPROC_PER_NODE \
-    --master_addr $MASTER_ADDR \
-    --master_port $MASTER_PORT \
-    --node_rank $RANK \
-    --rdzv_conf="timeout=7200,join_timeout=7200" \
-    -m rynn_scale.api.train \
-    --model_path $MODEL_PATH \
-    ${MODEL_ARGS[@]} \
-    ${DATA_ARGS[@]} \
-    ${FROZEN_ARGS[@]} \
-    ${OPTIMIZER_ARGS[@]} \
-    ${TRAINING_ARGS[@]} \
-    ${LOG_ARGS[@]}
+torchrun --nnodes 1 \
+  --nproc_per_node 8 \
+  --master_addr 127.0.0.1 \
+  --master_port 16666 \
+  --node_rank 0 \
+  -m rynn_scale.api.train \
+  --model_path /path/to/your/vlm_checkpoint \
+  --model_type qwen3_vl \
+  --use_action_head True \
+  --data_type VLADataset \
+  --data_path /path/to/train.jsonl \
+  --output_dir /path/to/output_dir \
+  --deepspeed /path/to/RynnScale/configs/zero2.json \
+  --bf16 True \
+  --gradient_checkpointing True \
+  --sequence_packing False \
+  --model_max_length 2048 \
+  --mm_max_length 1024 \
+  --micro_batch_size 1 \
+  --gradient_accumulation_steps 16 \
+  --learning_rate 2e-6 \
+  --action_dim 7 \
+  --time_horizon 5 \
+  --action_loss_weight 1.0 \
+  --lm_loss_weight 0.0
