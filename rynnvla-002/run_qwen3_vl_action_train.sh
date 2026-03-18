@@ -60,7 +60,6 @@ WITH_WRIST="${WITH_WRIST:-1}"              # 1/0
 WITH_WORLD_MODEL="${WITH_WORLD_MODEL:-0}"  # 1/0
 
 # Optional
-TOKENIZER_PATH="${TOKENIZER_PATH:-../ckpts/models--Alpha-VLLM--Lumina-mGPT-7B-768/snapshots/9624463a82ea5ce814af9b561dcd08a31082c3af}"
 RESUME_PATH="${RESUME_PATH:-}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
 
@@ -87,7 +86,6 @@ CMD=(
   --resolution "${RESOLUTION}"
   --preprocess "${PREPROCESS}"
 
-  --tokenizer_path "${TOKENIZER_PATH}"
   --batch_size "${BATCH_SIZE}"
   --accum_iter "${ACCUM_ITER}"
   --epochs "${EPOCHS}"

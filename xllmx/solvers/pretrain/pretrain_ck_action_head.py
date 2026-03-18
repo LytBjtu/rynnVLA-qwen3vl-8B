@@ -134,11 +134,16 @@ class PretrainSolverBase_ck_action_head(ABC):
         else:
             self.log_writer = None
         # 初始化数据处理器，预处理和不预处理的情况
-        self.item_processor = FlexARItemProcessor(target_size=288, tokenizer=self.args.tokenizer_path)
-        self.item_processor_action = ItemProcessor(target_size=256, tokenizer=self.args.tokenizer_path)
+        if getattr(self.args, "vlm_arch", "chameleon") == "qwen3_vl":
+            self.item_processor = None
+            self.item_processor_action = None
+        else:
+            self.item_processor = FlexARItemProcessor(target_size=288, tokenizer=self.args.tokenizer_path)
+            self.item_processor_action = ItemProcessor(target_size=256, tokenizer=self.args.tokenizer_path)
         
         #在线tokenize,分带不带state
-        if self.args.preprocess=='false':
+        self.item_processor_ar = None
+        if getattr(self.args, "vlm_arch", "chameleon") != "qwen3_vl" and self.args.preprocess=='false':
             if self.args.with_state:
                 self.item_processor_ar = FlexARItemProcessor_Action_State(
                     tokenizer=self.args.tokenizer_path,
