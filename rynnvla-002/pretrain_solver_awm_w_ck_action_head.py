@@ -1,14 +1,13 @@
 import pickle
 from typing import List, Tuple
 
-from accelerate import init_empty_weights
+from path_setup import ensure_repo_root_on_path
+
+REPO_ROOT = ensure_repo_root_on_path()
+
 import torch
 
-from model import (
-    ChameleonXLLMXConfig,
-    ChameleonXLLMXForConditionalGeneration_ck_action_head,
-    Qwen3VLXLLMXForConditionalGeneration_ck_action_head,
-)
+from model.vla_model_factory import build_vla_action_model
 from xllmx.data.item_processor import ItemProcessorBase
 from xllmx.solvers.pretrain import PretrainSolverBase_ck_action_head
 
@@ -71,54 +70,14 @@ class Solver(PretrainSolverBase_ck_action_head):
     def _model_func(
         self,
         init_from: str,
-    ) -> (ChameleonXLLMXForConditionalGeneration_ck_action_head, None):
+    ) -> tuple[object, None]:
 
-        # 只由rank0保存完整权重，其他rank仅建立空模型，每次FSDP加载时将完整权重广播到其他rank，各rank按照FSDP的规则保留自己的切片，释放其他
-        if self.args.vlm_arch == "qwen3_vl":
-            model_path = self.args.qwen_model_path or init_from
-            if not model_path:
-                raise ValueError("qwen3_vl requires --qwen_model_path or --init_from/--resume_path")
+        # 统一走模型工厂，尽量复用 qwen3vl/chameleon 的加载逻辑。
+        model, _ = build_vla_action_model(self.args, init_from, dp_rank=self.dp_rank)
 
-            model = Qwen3VLXLLMXForConditionalGeneration_ck_action_head.from_pretrained(
-                model_path,
-                action_dim=self.args.action_dim,
-                time_horizon=self.args.time_horizon,
-                dtype=torch.bfloat16,
-                device_map="cpu",
-            )
-            model.setup_action_tokens(
-                action_start_token=self.args.action_start_token,
-                action_end_token=self.args.action_end_token,
-            )
-            return model, None
-        # 使用chameleon加载模型结构，并删除vqmodel模块
-        if self.dp_rank == 0:
-            model = ChameleonXLLMXForConditionalGeneration_ck_action_head.from_pretrained(
-                init_from,
-                action_dim=self.args.action_dim,
-                time_horizon=self.args.time_horizon,
-                max_position_embeddings=self.args.max_seq_len,
-                mask_image_logits=self.args.mask_image_logits,
-                dropout=self.args.dropout,
-                z_loss_weight=self.args.z_loss_weight,
-                dtype=torch.bfloat16,
-                device_map="cpu",
-            )
-        else:
-            with init_empty_weights():
-                config = ChameleonXLLMXConfig.from_pretrained(
-                    init_from,
-                    action_dim=self.args.action_dim,
-                    time_horizon=self.args.time_horizon,
-                    max_position_embeddings=self.args.max_seq_len,
-                    mask_image_logits=self.args.mask_image_logits,
-                    dropout=self.args.dropout,
-                    z_loss_weight=self.args.z_loss_weight,
-                    dtype=torch.bfloat16,
-                )
-                model = ChameleonXLLMXForConditionalGeneration_ck_action_head(config)
-
-        del model.model.vqmodel # 做图像预处理的，训练不需要
+        # chameleon 的图像预处理分支在训练中不需要。
+        if self.args.vlm_arch != "qwen3_vl":
+            del model.model.vqmodel
 
         return model, None
 
@@ -131,6 +90,8 @@ class Solver(PretrainSolverBase_ck_action_head):
             "7B": "Alpha-VLLM/Chameleon_7B_mGPT",
             "34B": "Alpha-VLLM/Chameleon_34B_mGPT",
         }[self.args.model_size]
+
+        from model.modeling_xllmx_chameleon_ck_action_head import ChameleonXLLMXForConditionalGeneration_ck_action_head
 
         model = ChameleonXLLMXForConditionalGeneration_ck_action_head.from_pretrained(
             pretrained_name,

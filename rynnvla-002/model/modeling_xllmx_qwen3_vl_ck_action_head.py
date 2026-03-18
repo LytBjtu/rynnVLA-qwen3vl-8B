@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from transformers import Qwen3VLForConditionalGeneration, AutoProcessor
+from typing import List
 
 # 直接复用你现有 ActionHead
 from .modeling_xllmx_chameleon_ck_action_head import ActionHead
@@ -160,3 +161,41 @@ class Qwen3VLXLLMXForConditionalGeneration_ck_action_head(Qwen3VLForConditionalG
         if not ok:
             return torch.zeros(self.time_horizon, self.action_dim, device=full_input_ids.device)
         return predicted_actions.reshape(self.time_horizon, self.action_dim)
+
+    def _get_transformer_layers(self) -> List[nn.Module]:
+        language_model = getattr(self.model, "language_model", None)
+        if language_model is not None and hasattr(language_model, "layers"):
+            return list(language_model.layers)
+
+        if hasattr(self.model, "layers"):
+            return list(self.model.layers)
+
+        text_model = getattr(self, "text_model", None)
+        if text_model is not None and hasattr(text_model, "layers"):
+            return list(text_model.layers)
+
+        raise AttributeError("Cannot find transformer layers for Qwen3-VL FSDP/checkpointing setup.")
+
+    def get_fsdp_wrap_module_list(self) -> List[nn.Module]:
+        modules = [
+            *self._get_transformer_layers(),
+            self.lm_head,
+            self.action_head,
+        ]
+
+        language_model = getattr(self.model, "language_model", None)
+        if language_model is not None and hasattr(language_model, "embed_tokens"):
+            modules.append(language_model.embed_tokens)
+        elif hasattr(self.model, "embed_tokens"):
+            modules.append(self.model.embed_tokens)
+
+        visual = getattr(self.model, "visual", None)
+        if visual is None:
+            visual = getattr(self, "visual", None)
+        if isinstance(visual, nn.Module):
+            modules.append(visual)
+
+        return modules
+
+    def get_checkpointing_wrap_module_list(self) -> List[nn.Module]:
+        return self._get_transformer_layers()
