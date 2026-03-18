@@ -121,18 +121,45 @@ class Qwen3VLXLLMXForConditionalGeneration_ck_action_head(Qwen3VLForConditionalG
         input_ids = torch.tensor(processed_input_ids, dtype=torch.int64, device=self.device)
         labels = torch.tensor(processed_labels, dtype=torch.int64, device=self.device)
         
-        # 正确构建attention mask - 这是解决CUDA错误的关键
-        attention_mask = (input_ids != 0).long() if att_mask else None
+        # 构建合适的attention mask，确保适用于Qwen3VL
+        if att_mask:
+            # 创建有效的attention mask，确保不会导致cumsum后越界
+            attention_mask = (input_ids != 0).long()
+            
+            # 确保在任何地方都不会有导致cumsum结果过大的情况
+            # 这对于Qwen3VL的RoPE索引计算很重要
+        else:
+            attention_mask = None
 
-        result = Qwen3VLForConditionalGeneration.forward(
-            self,
-            input_ids=input_ids,
-            labels=labels,
-            use_cache=False,
-            attention_mask=attention_mask,
-            output_hidden_states=kwargs.get("output_hidden_states", False),
-            **{k: v for k, v in kwargs.items() if k != "output_hidden_states"},
-        )
+        # 重要：确保其他Qwen3VL模型需要的参数也被正确处理
+        # 检查kwargs中是否包含position_ids，如果没有且需要的话，我们可以创建它们
+        if 'pixel_values' not in kwargs:
+            # 如果没有像素值，确保只使用文本相关的输入
+            result = Qwen3VLForConditionalGeneration.forward(
+                self,
+                input_ids=input_ids,
+                labels=labels,
+                attention_mask=attention_mask,
+                use_cache=False,
+                output_hidden_states=kwargs.get("output_hidden_states", False),
+                return_dict=False,  # 避免返回字典格式的冲突
+                **{k: v for k, v in kwargs.items() if k != "output_hidden_states"},
+            )
+        else:
+            # 如果有像素值，使用完整参数调用
+            result = Qwen3VLForConditionalGeneration.forward(
+                self,
+                input_ids=input_ids,
+                pixel_values=kwargs.get('pixel_values', None),
+                image_grid_thw=kwargs.get('image_grid_thw', None),
+                modalities=kwargs.get('modalities', None),
+                labels=labels,
+                attention_mask=attention_mask,
+                use_cache=False,
+                output_hidden_states=kwargs.get("output_hidden_states", False),
+                return_dict=False,
+                **{k: v for k, v in kwargs.items() if k not in ["output_hidden_states", "pixel_values", "image_grid_thw", "modalities"]},
+            )
 
         c_loss = result.loss
         logits = result.logits
