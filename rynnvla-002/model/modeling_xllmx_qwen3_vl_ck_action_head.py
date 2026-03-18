@@ -88,6 +88,7 @@ class Qwen3VLXLLMXForConditionalGeneration_ck_action_head(Qwen3VLForConditionalG
         if not training:
             return Qwen3VLForConditionalGeneration.forward(self, input_ids=input_ids, labels=labels, **kwargs)
 
+        # 处理input_ids和labels，确保长度一致
         max_tokens = max(len(x) for x in input_ids)
         
         # Qwen3VL模型可能没有max_position_embeddings属性，需要检查并处理
@@ -101,15 +102,27 @@ class Qwen3VLXLLMXForConditionalGeneration_ck_action_head(Qwen3VLForConditionalG
             max_pos_embeddings = 32768  # Qwen模型通常使用较大的上下文长度
             
         max_tokens = min(max_tokens, max_pos_embeddings)
-        input_ids = [example[:max_tokens] for example in input_ids]
-        labels = [label[:max_tokens] for label in labels]
+        
+        # 截断或填充input_ids和labels到相同长度
+        processed_input_ids = []
+        processed_labels = []
+        for example, label in zip(input_ids, labels):
+            # 截断到最大长度
+            truncated_example = example[:max_tokens]
+            truncated_label = label[:max_tokens]
+            
+            # 填充到最大长度
+            padded_example = truncated_example + [0] * (max_tokens - len(truncated_example))
+            padded_label = truncated_label + [-100] * (max_tokens - len(truncated_label))
+            
+            processed_input_ids.append(padded_example)
+            processed_labels.append(padded_label)
 
-        input_ids = [example + [0] * (max_tokens - len(example)) for example in input_ids]
-        labels = [label + [-100] * (max_tokens - len(label)) for label in labels]
-
-        input_ids = torch.tensor(input_ids, dtype=torch.int64, device=self.device)
-        labels = torch.tensor(labels, dtype=torch.int64, device=self.device)
-        attention_mask = input_ids.ne(0).long() if att_mask else None
+        input_ids = torch.tensor(processed_input_ids, dtype=torch.int64, device=self.device)
+        labels = torch.tensor(processed_labels, dtype=torch.int64, device=self.device)
+        
+        # 正确构建attention mask - 这是解决CUDA错误的关键
+        attention_mask = (input_ids != 0).long() if att_mask else None
 
         result = Qwen3VLForConditionalGeneration.forward(
             self,
