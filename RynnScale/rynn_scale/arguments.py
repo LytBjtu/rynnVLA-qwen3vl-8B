@@ -162,6 +162,13 @@ class DataArguments(BaseArguments):
 
 @dataclass
 class TrainingArguments(ModelArguments, ParallelismArguments, DataArguments, BaseArguments):
+    use_action_head: bool = field(default=False)
+    action_dim: int = field(default=7)
+    time_horizon: int = field(default=5)
+    action_loss_weight: float = field(default=1.0)
+    lm_loss_weight: float = field(default=0.0)
+    action_loss_type: str = field(default="smooth_l1", metadata={"choices": ["l1", "mse", "smooth_l1"]})
+
     # Efficiency-related configs
     deepspeed: str = field(default=None)
 

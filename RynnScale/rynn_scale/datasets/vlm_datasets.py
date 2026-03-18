@@ -6,6 +6,7 @@ import traceback
 import hashlib
 from typing import Any, Optional, List, Dict
 
+import numpy as np
 import torch
 from datasets import load_dataset, concatenate_datasets, Dataset as HFDataset
 from PIL import Image
@@ -395,3 +396,31 @@ class PseudoVLMDatasetFixedLength(PseudoVLMDataset):
         max_text_length = self.model_max_length - mm_sequence_length * num_images - 100
 
         return [image_size] * num_images, max_text_length - 512, 512
+
+
+@DATASET_REGISTRY.register()
+class VLADataset(VLMDataset):
+    def _load_action_array(self, action_value: Any) -> np.ndarray:
+        if isinstance(action_value, str):
+            return np.asarray(np.load(action_value), dtype=np.float32)
+
+        if isinstance(action_value, list):
+            if len(action_value) == 0:
+                raise ValueError("`action` field is empty.")
+            if isinstance(action_value[0], str):
+                return np.stack([np.asarray(np.load(path), dtype=np.float32) for path in action_value], axis=0)
+            return np.asarray(action_value, dtype=np.float32)
+
+        return np.asarray(action_value, dtype=np.float32)
+
+    def _preprocess(self, data_dict: Dict[str, Any]) -> Dict[str, torch.Tensor]:
+        model_inputs = super()._preprocess(data_dict)
+        action_value = data_dict.get("actions", data_dict.get("action"))
+        if action_value is None:
+            raise KeyError("VLADataset expects each sample to contain an `action` or `actions` field.")
+
+        actions = self._load_action_array(action_value)
+        if actions.ndim == 1:
+            actions = actions[None, :]
+        model_inputs["actions"] = torch.as_tensor(actions, dtype=torch.float32)
+        return model_inputs

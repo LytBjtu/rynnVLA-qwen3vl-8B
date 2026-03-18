@@ -4,6 +4,7 @@ import torch
 
 from .base import BaseInferenceWrapper
 from .qwen3_vl import Qwen3VLInferenceWrapper
+from .qwen3_vl_action_head import Qwen3VLActionHeadInferenceWrapper
 from .qwen3_vl_moe import Qwen3VLMoeInferenceWrapper
 from ..registry import INFERENCE_WRAPPER_REGISTRY
 

@@ -3,7 +3,7 @@ import importlib
 import inspect
 from contextlib import contextmanager
 from collections import defaultdict
-from typing import Dict, Set, Optional
+from typing import Dict, Set, Optional, List
 
 import json
 import torch
@@ -282,6 +282,8 @@ def _init_empty_params():
 def _load_pretrained_weights(
     model: PreTrainedModel,
     pretrained_model_name_or_path: str,
+    strict: bool = True,
+    ignore_missing_prefixes: Optional[List[str]] = None,
 ):
     from ..utils.expert_parallel import BaseMoELayer
 
@@ -302,6 +304,10 @@ def _load_pretrained_weights(
     tie_word_embeddings = model.config.tie_word_embeddings or model.config.get_text_config().tie_word_embeddings
     original_keys = set(model.state_dict(**state_dict_args).keys())
     keys_to_load = original_keys.copy()
+    if ignore_missing_prefixes:
+        keys_to_load = {
+            key for key in keys_to_load if not any(key.startswith(prefix) for prefix in ignore_missing_prefixes)
+        }
 
     head_key = "lm_head.weight"
     # TODO: handle embedding keys for general models
@@ -323,16 +329,30 @@ def _load_pretrained_weights(
                 state_dict.pop(embedding_key)
     else:
         state_dict = {
-            key: torch.empty_like(tensor, device="cuda") for key, tensor in model.state_dict(**state_dict_args).items()
+            key: torch.empty_like(tensor, device="cuda")
+            for key, tensor in model.state_dict(**state_dict_args).items()
+            if key in keys_to_load
         }
         if mpu.get_expert_data_parallel_rank() == 0:
             _recv_expert_params(expert_param_tags, state_dict)
 
-    state_dict_args = {"strict": True, "assign": True}
+    state_dict_args = {"strict": strict and not ignore_missing_prefixes, "assign": True}
     if "convert" in inspect.signature(model.load_state_dict).parameters:
         state_dict_args["convert"] = True
 
     incompatible_keys = model.load_state_dict(state_dict, **state_dict_args)
+    if ignore_missing_prefixes:
+        unexpected_keys = list(incompatible_keys.unexpected_keys)
+        missing_keys = [
+            key
+            for key in incompatible_keys.missing_keys
+            if not any(key.startswith(prefix) for prefix in ignore_missing_prefixes)
+        ]
+        if unexpected_keys or missing_keys:
+            raise RuntimeError(
+                f"Failed to load checkpoint from '{pretrained_model_name_or_path}'. "
+                f"missing keys: {missing_keys}, unexpected keys: {unexpected_keys}"
+            )
     logger.info(
         f"Loaded checkpoint from '{pretrained_model_name_or_path}', "
         f"missing keys: {incompatible_keys.missing_keys}, "
@@ -369,9 +389,14 @@ def build_model(
     model_type: str,
     model_path: str,
     dtype: torch.dtype,
-    attn_implementation: str,# 注意力实现方式
+    attn_implementation: str,
     vision_encoder_path: Optional[str] = None,
     reduced_layers_in_stage_zero: int = 0,
+    action_dim: int = 7,
+    time_horizon: int = 5,
+    action_loss_weight: float = 1.0,
+    lm_loss_weight: float = 0.0,
+    action_loss_type: str = "smooth_l1",
 ):
     original_config = AutoConfig.from_pretrained(model_path)
     if type(original_config) not in MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING:
@@ -384,7 +409,22 @@ def build_model(
     logger.info(f"Apply monkey patch for `{model_type}` using {module.apply_monkey_patch}")
     module.apply_monkey_patch()
 
-    if type(original_config) in MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING:
+    if model_type == "qwen3_vl_action_head":
+        from .qwen3_vl_action_head.modeling_qwen3_vl_action_head import (
+            Qwen3VLActionHeadForConditionalGeneration,
+        )
+
+        processor = AutoProcessor.from_pretrained(model_path)
+        with _init_empty_params():
+            model = Qwen3VLActionHeadForConditionalGeneration(
+                config=original_config,
+                action_dim=action_dim,
+                time_horizon=time_horizon,
+                action_loss_weight=action_loss_weight,
+                lm_loss_weight=lm_loss_weight,
+                action_loss_type=action_loss_type,
+            )
+    elif type(original_config) in MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING:
         processor = AutoProcessor.from_pretrained(model_path)
         with _init_empty_params():
             model = AutoModelForImageTextToText.from_config(
@@ -448,6 +488,14 @@ def build_model(
         )
 
     _check_chat_template(processor)
-    _load_pretrained_weights(model, model_path)
+    if model_type == "qwen3_vl_action_head":
+        _load_pretrained_weights(
+            model,
+            model_path,
+            strict=False,
+            ignore_missing_prefixes=["action_head"],
+        )
+    else:
+        _load_pretrained_weights(model, model_path)
 
     return model, processor

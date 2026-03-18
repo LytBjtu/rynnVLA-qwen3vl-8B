@@ -25,13 +25,20 @@ def train():
 
     enable_full_determinism(args.seed) if args.full_determinism else set_seed(args.seed)
 
+    model_type = "qwen3_vl_action_head" if args.use_action_head else args.model_type
+
     model, processor = build_model(
-        model_type=args.model_type,
+        model_type=model_type,
         model_path=args.model_path,
         dtype=args.dtype,
         attn_implementation=args.attn_implementation,
         vision_encoder_path=args.vision_encoder_path,
         reduced_layers_in_stage_zero=args.reduced_layers_in_stage_zero,
+        action_dim=args.action_dim,
+        time_horizon=args.time_horizon,
+        action_loss_weight=args.action_loss_weight,
+        lm_loss_weight=args.lm_loss_weight,
+        action_loss_type=args.action_loss_type,
     )
 
     model.loss_function = partial(
@@ -39,6 +46,9 @@ def train():
         loss_reduction_scope=args.loss_reduction_scope,
         loss_implementation=args.loss_implementation,
     )
+
+    if model_type == "qwen3_vl_action_head" and args.sequence_packing:
+        raise ValueError("`qwen3_vl_action_head` currently requires `sequence_packing=False`.")
 
     # Process Model
     if args.frozen_parameters is not None:

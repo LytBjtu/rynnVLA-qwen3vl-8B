@@ -871,7 +871,7 @@ class PretrainSolverBase_ck_action_head(ABC):
             model = model.module
         return model
 
-    def _encode_action_tokens_qwen(self, action_value, start_token_id, end_token_id):
+    def _encode_action_tokens_qwen(self, action_value, start_token_id, end_token_id, action_bin_token_ids):
         if isinstance(action_value, str):
             action_value = np.load(action_value)
         action_value = np.array(action_value)
@@ -887,9 +887,10 @@ class PretrainSolverBase_ck_action_head(ABC):
 
         norm_action = 2 * (action_value - min_values) / (max_values - min_values + 1e-8) - 1
         norm_action = np.clip(norm_action, a_min=-1, a_max=1)
-        bins = np.linspace(-1, 1, 256)
-        discretized_action = np.digitize(norm_action, bins) + start_token_id + 1
-        return [start_token_id, *discretized_action.tolist(), end_token_id]
+        bin_indices = np.floor((norm_action + 1.0) * 0.5 * len(action_bin_token_ids)).astype(np.int64)
+        bin_indices = np.clip(bin_indices, 0, len(action_bin_token_ids) - 1)
+        discretized_action = [action_bin_token_ids[idx] for idx in bin_indices.tolist()]
+        return [start_token_id, *discretized_action, end_token_id]
 
     def _build_qwen_examples_labels(self, conversations, images, actions, states):
         model = self._unwrap_model()
@@ -902,6 +903,19 @@ class PretrainSolverBase_ck_action_head(ABC):
         end_token = getattr(self.args, "action_end_token", "<|action_end|>")
         start_token_id = tok.convert_tokens_to_ids(start_token)
         end_token_id = tok.convert_tokens_to_ids(end_token)
+        action_bin_tokens = [f"<|action_bin_{i:03d}|>" for i in range(256)]
+        action_bin_token_ids = tok.convert_tokens_to_ids(action_bin_tokens)
+        unk_token_id = getattr(tok, "unk_token_id", None)
+        if (
+            start_token_id is None
+            or end_token_id is None
+            or any(token_id is None for token_id in action_bin_token_ids)
+            or (unk_token_id is not None and any(token_id == unk_token_id for token_id in action_bin_token_ids))
+        ):
+            raise ValueError(
+                "Qwen action tokens are not initialized in the tokenizer. "
+                "Please make sure model.setup_action_tokens() ran before training."
+            )
         pad_token_id = tok.pad_token_id if tok.pad_token_id is not None else (tok.eos_token_id if tok.eos_token_id is not None else 0)
         max_seq_len = getattr(self.args, "max_seq_len", None)
 
@@ -937,7 +951,7 @@ class PretrainSolverBase_ck_action_head(ABC):
 
             gt_action = act[0] if isinstance(act, list) and len(act) > 0 else act
             action_ids = torch.tensor(
-                self._encode_action_tokens_qwen(gt_action, start_token_id, end_token_id),
+                self._encode_action_tokens_qwen(gt_action, start_token_id, end_token_id, action_bin_token_ids),
                 dtype=torch.long,
             )
             action_attention_mask = torch.ones_like(action_ids)
@@ -1289,6 +1303,11 @@ class PretrainSolverBase_ck_action_head(ABC):
 
 
     def is_action_token(self, token):
+        model = self._unwrap_model()
+        start_id = getattr(model, "action_start_token_id", None)
+        end_id = getattr(model, "action_end_token_id", None)
+        if start_id is not None and end_id is not None:
+            return token == start_id or token == end_id
         return token == 10004 or token == 15004
 
     def is_image_token(self, token):

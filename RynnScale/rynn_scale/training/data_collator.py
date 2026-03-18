@@ -26,6 +26,20 @@ class DataCollator(object):
 
         return mm_inputs
 
+    def _collate_extra_tensor_inputs(self, instances, reserved_keys):
+        extra_inputs = {}
+        all_keys = set().union(*(instance.keys() for instance in instances))
+        for key in all_keys:
+            if key in reserved_keys:
+                continue
+            values = [instance[key] for instance in instances if key in instance]
+            if len(values) != len(instances):
+                continue
+            if not all(torch.is_tensor(value) for value in values):
+                continue
+            extra_inputs[key] = torch.stack(values, dim=0)
+        return extra_inputs
+
     def _collate_fn_packing(self, instances):
         input_ids, position_ids, labels = [], [], []
 
@@ -60,6 +74,12 @@ class DataCollator(object):
             "max_length_q": max_length,
             "max_length_k": max_length,
         }
+        batch.update(
+            self._collate_extra_tensor_inputs(
+                instances,
+                reserved_keys=set(batch.keys()) | {"data_index"},
+            )
+        )
 
         return batch
 
@@ -97,10 +117,18 @@ class DataCollator(object):
             "labels": labels,
             **self._collate_mm_inputs(instances),
         }
+        batch.update(
+            self._collate_extra_tensor_inputs(
+                instances,
+                reserved_keys=set(batch.keys()) | {"data_index"},
+            )
+        )
 
         return batch
 
     def __call__(self, instances: List[Dict[str, Any]]):
+        if self.sequence_packing and any("actions" in instance for instance in instances):
+            raise ValueError("Sequence packing is not supported for action-supervised batches.")
         if self.sequence_packing:
             return self._collate_fn_packing(instances)
         return self._collate_fn_padding(instances)

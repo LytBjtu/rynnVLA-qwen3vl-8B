@@ -395,6 +395,13 @@ class Trainer(object):
             return
         ckpt_name = f"model_pp_rank_{self.args.pp_rank:02d}_ep_rank_{self.args.ep_rank:02d}.pt"
         torch.save(self.model.state_dict(), os.path.join(output_dir, ckpt_name))
+        if self.args.global_rank == 0 and hasattr(self.model, "save_checkpoint_metadata"):
+            self.model.save_checkpoint_metadata(
+                output_dir=output_dir,
+                base_model_path=self.args.model_path,
+                pipeline_parallel_size=self.args.pp_world_size,
+                expert_parallel_size=self.args.ep_world_size,
+            )
 
     def _load_model(self, checkpoint):
         ckpt_name = f"model_pp_rank_{self.args.pp_rank:02d}_ep_rank_{self.args.ep_rank:02d}.pt"

@@ -20,6 +20,8 @@ class Qwen3VLXLLMXForConditionalGeneration_ck_action_head(Qwen3VLForConditionalG
         self.action_dim = action_dim
         self.time_horizon = time_horizon
         self.action_start_token_id = None
+        self.action_end_token_id = None
+        self.action_bin_token_ids = None
         self.processor = None
 
     @classmethod
@@ -38,32 +40,49 @@ class Qwen3VLXLLMXForConditionalGeneration_ck_action_head(Qwen3VLForConditionalG
         model.processor = AutoProcessor.from_pretrained(pretrained_model_name_or_path, trust_remote_code=True)
         return model
 
+    def _get_action_bin_token_strings(self, num_bins=256):
+        return [f"<|action_bin_{i:03d}|>" for i in range(num_bins)]
+
     def setup_action_tokens(self, action_start_token="<|action_start|>", action_end_token="<|action_end|>"):
         tok = self.processor.tokenizer
-        tok.add_special_tokens({"additional_special_tokens": [action_start_token, action_end_token]})
+        action_bin_tokens = self._get_action_bin_token_strings()
+        tok.add_special_tokens({"additional_special_tokens": [action_start_token, action_end_token, *action_bin_tokens]})
         self.resize_token_embeddings(len(tok))
         self.action_start_token_id = tok.convert_tokens_to_ids(action_start_token)
         self.action_end_token_id = tok.convert_tokens_to_ids(action_end_token)
+        self.action_bin_token_ids = tok.convert_tokens_to_ids(action_bin_tokens)
 
     def _get_action_token_ids(self):
         if self.action_start_token_id is None and self.processor is not None:
             tok = self.processor.tokenizer
             self.action_start_token_id = tok.convert_tokens_to_ids("<|action_start|>")
             self.action_end_token_id = tok.convert_tokens_to_ids("<|action_end|>")
-
+            self.action_bin_token_ids = tok.convert_tokens_to_ids(self._get_action_bin_token_strings())
         start_id = self.action_start_token_id if self.action_start_token_id is not None else 10004
         end_id = getattr(self, "action_end_token_id", None)
         if end_id is None:
             end_id = start_id + 5000
         return start_id, end_id
 
+    def _get_action_bin_token_ids(self):
+        if self.action_bin_token_ids is None and self.processor is not None:
+            tok = self.processor.tokenizer
+            self.action_bin_token_ids = tok.convert_tokens_to_ids(self._get_action_bin_token_strings())
+        return self.action_bin_token_ids
+
     def decode_token_ids_to_actions(self, dis_action):
-        bins = torch.linspace(-1, 1, 256, device=dis_action.device)
-        bin_centers = (bins[:-1] + bins[1:]) / 2.0
-        start_id, _ = self._get_action_token_ids()
-        discretized_actions = dis_action - 1 - start_id
-        discretized_actions = torch.clamp(discretized_actions - 1, min=0, max=bin_centers.shape[0] - 1).long()
-        return bin_centers[discretized_actions]
+        bin_edges = torch.linspace(-1, 1, 257, device=dis_action.device)
+        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2.0
+        bin_token_ids = self._get_action_bin_token_ids()
+        if bin_token_ids is None:
+            raise ValueError("Qwen action bin tokens are not initialized.")
+
+        token_id_tensor = torch.as_tensor(bin_token_ids, device=dis_action.device, dtype=dis_action.dtype)
+        matches = dis_action.unsqueeze(-1) == token_id_tensor
+        bin_indices = matches.long().argmax(dim=-1)
+        has_match = matches.any(dim=-1)
+        bin_indices = torch.where(has_match, bin_indices, torch.zeros_like(bin_indices))
+        return bin_centers[bin_indices.long()]
 
     def find_sequences(self, tensor_input):
         start_id, end_id = self._get_action_token_ids()
@@ -148,6 +167,15 @@ class Qwen3VLXLLMXForConditionalGeneration_ck_action_head(Qwen3VLForConditionalG
                 "Qwen3-VL training input contains image placeholder tokens, but pixel_values/image_grid_thw "
                 "were not provided. Please build Qwen batches with the processor so vision inputs are passed "
                 "together with input_ids."
+            )
+
+        vocab_size = self.get_input_embeddings().num_embeddings
+        input_id_min = int(input_ids.min().item())
+        input_id_max = int(input_ids.max().item())
+        if input_id_min < 0 or input_id_max >= vocab_size:
+            raise ValueError(
+                f"Qwen3-VL input_ids out of range for embedding table: min={input_id_min}, "
+                f"max={input_id_max}, vocab_size={vocab_size}."
             )
 
         result = Qwen3VLForConditionalGeneration.forward(
