@@ -104,12 +104,22 @@ class LiberoFinetuneConversation(Dataset):
             if task_name.endswith("_demo"):
                 task_name = task_name[:-5]
 
+            resolved_path = self._resolve_task_file_path(path)
+            if not Path(resolved_path).exists():
+                raise FileNotFoundError(
+                    "custom_files task path not found.\n"
+                    f"config: {self.config_path}\n"
+                    f"task_name: {task_name}\n"
+                    f"original path: {path}\n"
+                    f"resolved path: {resolved_path}"
+                )
+
             task_entries.append(
                 {
                     "task_id": task_id,
                     "task_name": task_name,
                     "task_name_readable": prompt_name.replace("_", " "),
-                    "data_path": self._resolve_task_file_path(path),
+                    "data_path": resolved_path,
                 }
             )
 
@@ -127,6 +137,25 @@ class LiberoFinetuneConversation(Dataset):
 
         return str(path_obj)
 
+    def _open_hdf5(self, data_path, task_name):
+        if not Path(data_path).exists():
+            raise FileNotFoundError(
+                "dataset HDF5 file not found.\n"
+                f"config: {self.config_path}\n"
+                f"task_name: {task_name}\n"
+                f"data_path: {data_path}"
+            )
+        try:
+            return h5py.File(data_path, "r")
+        except OSError as exc:
+            raise OSError(
+                "failed to open dataset HDF5 file.\n"
+                f"config: {self.config_path}\n"
+                f"task_name: {task_name}\n"
+                f"data_path: {data_path}\n"
+                f"original error: {exc}"
+            ) from exc
+
     def get_annotation_data(self, split='train'):
         self.data_list = []
         split_index_ood = math.ceil(self.num_tasks_in_suite * 0.9)
@@ -135,7 +164,7 @@ class LiberoFinetuneConversation(Dataset):
             task_name = task_entry["task_name"]
             task_id = task_entry["task_id"]
             orig_data_path = task_entry["data_path"]
-            orig_data_file = h5py.File(orig_data_path, "r")
+            orig_data_file = self._open_hdf5(orig_data_path, task_name)
             orig_data = orig_data_file["data"]
         
             trj_list = []
@@ -233,9 +262,10 @@ class LiberoFinetuneConversation(Dataset):
     def __getitem__(self, idx):
         action_ids = self.data_list[idx]['action_ids']
         trj = self.data_list[idx]['trj']
+        task_name = self.data_list[idx]['task_name']
         task_name_readable = self.data_list[idx]['task_name_readable']
         orig_data_path = self.data_list[idx]['data_path']
-        orig_data_file = h5py.File(orig_data_path, "r")
+        orig_data_file = self._open_hdf5(orig_data_path, task_name)
         orig_data = orig_data_file["data"]
         demo_data = orig_data[f"demo_{trj}"]
         orig_rgb = demo_data['obs']['agentview_rgb'][()]
