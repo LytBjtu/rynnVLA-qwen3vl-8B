@@ -97,6 +97,9 @@ class Qwen3VLXLLMXForConditionalGeneration_ck_action_head(Qwen3VLForConditionalG
             return Qwen3VLForConditionalGeneration.forward(self, input_ids=input_ids, labels=labels, **kwargs)
 
         device = next(self.parameters()).device
+        output_hidden_states = kwargs.pop("output_hidden_states", False)
+        use_cache = kwargs.pop("use_cache", False)
+        return_dict = kwargs.pop("return_dict", True)
         pixel_values = kwargs.pop("pixel_values", None)
         image_grid_thw = kwargs.pop("image_grid_thw", None)
         attention_mask = kwargs.pop("attention_mask", None)
@@ -155,9 +158,9 @@ class Qwen3VLXLLMXForConditionalGeneration_ck_action_head(Qwen3VLForConditionalG
             modalities=modalities,
             labels=labels,
             attention_mask=attention_mask,
-            use_cache=False,
-            output_hidden_states=kwargs.get("output_hidden_states", False),
-            return_dict=True,
+            use_cache=use_cache,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
             **kwargs,
         )
 
@@ -169,7 +172,7 @@ class Qwen3VLXLLMXForConditionalGeneration_ck_action_head(Qwen3VLForConditionalG
         predicted_actions = torch.empty(0, self.action_dim, device=device)
         loss_ct = c_loss * 0
 
-        if kwargs.get("output_hidden_states", False):
+        if output_hidden_states:
             hidden_states = result.hidden_states[-1]
             start_id, _ = self._get_action_token_ids()
             predicted_actions, actions_flag = self.action_head(
