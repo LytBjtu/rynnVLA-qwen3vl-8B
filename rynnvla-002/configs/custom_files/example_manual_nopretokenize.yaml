@@ -1,0 +1,15 @@
+META:
+  split: all
+  libero_task_suite: custom_files
+  task_files:
+    - path: /path/to/task_a_demo.hdf5
+      task_name: custom_task_a
+      prompt_name: put the red mug in the drawer
+    - path: /path/to/task_b_demo.hdf5
+      task_name: custom_task_b
+      prompt_name: stack the yellow bowl on the plate
+action_model:
+  len_action: 10
+  his: 2
+world_model:
+  his: 1

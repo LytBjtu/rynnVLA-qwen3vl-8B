@@ -14,7 +14,10 @@ import torch.distributed as dist
 from torch.utils.data import Dataset
 import yaml
 
-from libero.libero import benchmark
+try:
+    from libero.libero import benchmark
+except ImportError:
+    benchmark = None
 from PIL import Image
 import numpy as np
 
@@ -24,16 +27,17 @@ logger = logging.getLogger(__name__)
 class LiberoFinetuneConversation(Dataset):
     def __init__(self, config_path, resolution, with_state=True, with_wrist=True, with_action=True, with_world_model=True):
         logger.info(f"read dataset config from {config_path}")
+        self.config_path = Path(config_path)
+        self.config_dir = self.config_path.parent
         with open(config_path, "r") as f:
             self.config = yaml.load(f, Loader=yaml.FullLoader)
         logger.info("DATASET CONFIG:")
         logger.info(self.config)
 
-        benchmark_dict = benchmark.get_benchmark_dict()
-        logger.info(benchmark_dict)
-        logger.info(self.config["META"]["libero_task_suite"])
-        self.task_suite = benchmark_dict[self.config["META"]["libero_task_suite"]]()
-        self.num_tasks_in_suite = self.task_suite.n_tasks
+        self.task_suite_name = self.config["META"]["libero_task_suite"]
+        self.use_custom_task_files = self.task_suite_name == "custom_files"
+        self.task_entries = self._build_task_entries()
+        self.num_tasks_in_suite = len(self.task_entries)
 
         if self.config["META"]["split"]=="all":
             self.split_training_set = False
@@ -45,20 +49,92 @@ class LiberoFinetuneConversation(Dataset):
         self.with_world_model = with_world_model
         self.get_annotation_data(split=self.config["META"]["split"])
 
+    def _build_task_entries(self):
+        if self.use_custom_task_files:
+            return self._build_custom_task_entries()
+
+        if benchmark is None:
+            raise ImportError(
+                "libero is required for built-in task suites. "
+                "Use libero_task_suite: custom_files to provide explicit HDF5 paths."
+            )
+
+        benchmark_dict = benchmark.get_benchmark_dict()
+        logger.info(benchmark_dict)
+        logger.info(self.task_suite_name)
+        self.task_suite = benchmark_dict[self.task_suite_name]()
+
+        task_dic = {}
+        for task_id in range(self.task_suite.n_tasks):
+            task = self.task_suite.get_task(task_id).name
+            task_dic[task] = task_id
+
+        task_entries = []
+        for task_name in sorted(task_dic.keys()):
+            task_entries.append(
+                {
+                    "task_id": task_dic[task_name],
+                    "task_name": task_name,
+                    "task_name_readable": task_name.replace("_", " "),
+                    "data_path": os.path.join(self.config["META"]["raw_data_dir"], f"{task_name}_demo.hdf5"),
+                }
+            )
+        return task_entries
+
+    def _build_custom_task_entries(self):
+        raw_task_files = self.config["META"].get("task_files", [])
+        if not raw_task_files:
+            raise ValueError(
+                "custom_files suite requires META.task_files with at least one HDF5 path."
+            )
+
+        task_entries = []
+        for task_id, task_file in enumerate(raw_task_files):
+            if isinstance(task_file, str):
+                path = task_file
+                task_name = Path(path).stem
+                prompt_name = task_name.replace("_", " ")
+            elif isinstance(task_file, dict):
+                path = task_file["path"]
+                task_name = task_file.get("task_name") or Path(path).stem
+                prompt_name = task_file.get("prompt_name") or task_file.get("task_name") or task_name.replace("_", " ")
+            else:
+                raise TypeError("Each META.task_files entry must be a string path or a mapping.")
+
+            if task_name.endswith("_demo"):
+                task_name = task_name[:-5]
+
+            task_entries.append(
+                {
+                    "task_id": task_id,
+                    "task_name": task_name,
+                    "task_name_readable": prompt_name.replace("_", " "),
+                    "data_path": self._resolve_task_file_path(path),
+                }
+            )
+
+        logger.info("Using custom task files: %s", task_entries)
+        return task_entries
+
+    def _resolve_task_file_path(self, path):
+        path_obj = Path(path)
+        if path_obj.is_absolute() or path_obj.exists():
+            return str(path_obj)
+
+        config_relative_path = self.config_dir / path_obj
+        if config_relative_path.exists():
+            return str(config_relative_path)
+
+        return str(path_obj)
 
     def get_annotation_data(self, split='train'):
         self.data_list = []
         split_index_ood = math.ceil(self.num_tasks_in_suite * 0.9)
-        task_dic = {}
-        for task_id in range(self.num_tasks_in_suite):
-            task = self.task_suite.get_task(task_id).name
-            task_dic[task] = task_id
-        sorted_task_name = sorted(task_dic.keys())
 
-        for task_id_new in range(len(sorted_task_name)):
-            task_name = sorted_task_name[task_id_new]
-            task_id = task_dic[task_name]
-            orig_data_path = os.path.join(self.config["META"]["raw_data_dir"], f"{task_name}_demo.hdf5")
+        for task_id_new, task_entry in enumerate(self.task_entries):
+            task_name = task_entry["task_name"]
+            task_id = task_entry["task_id"]
+            orig_data_path = task_entry["data_path"]
             orig_data_file = h5py.File(orig_data_path, "r")
             orig_data = orig_data_file["data"]
         
@@ -86,15 +162,33 @@ class LiberoFinetuneConversation(Dataset):
                 orig_actions = demo_data["actions"][()]
                 for j in range(orig_actions.shape[0]):
                     if self.with_action:
-                        action_data = self.get_action_data(j, orig_actions.shape[0], orig_actions, trj=trj_id, task_name=task_name, task_id=task_id)
+                        action_data = self.get_action_data(
+                            j,
+                            orig_actions.shape[0],
+                            orig_actions,
+                            trj=trj_id,
+                            task_name=task_name,
+                            task_id=task_id,
+                            task_name_readable=task_entry["task_name_readable"],
+                            data_path=orig_data_path,
+                        )
                         if action_data is not None:
                             self.data_list.append(action_data)
                     if self.with_world_model:
-                        world_data = self.get_world_model_data(j, orig_actions.shape[0], orig_actions, trj=trj_id, task_name=task_name, task_id=task_id)
+                        world_data = self.get_world_model_data(
+                            j,
+                            orig_actions.shape[0],
+                            orig_actions,
+                            trj=trj_id,
+                            task_name=task_name,
+                            task_id=task_id,
+                            task_name_readable=task_entry["task_name_readable"],
+                            data_path=orig_data_path,
+                        )
                         if world_data is not None:
                             self.data_list.append(world_data)
 
-    def get_action_data(self, action_idx, action_sum, orig_actions, trj, task_name, task_id):
+    def get_action_data(self, action_idx, action_sum, orig_actions, trj, task_name, task_id, task_name_readable, data_path):
         len_action = self.config["action_model"]["len_action"]
         his = self.config["action_model"]["his"]
         if action_idx>action_sum-len_action:
@@ -107,13 +201,15 @@ class LiberoFinetuneConversation(Dataset):
         data['action_ids'] = list(range(action_idx, action_idx + len_action))
 
         data['task_name'] = task_name
+        data['task_name_readable'] = task_name_readable
         data['trj'] = trj
         data['task_type'] = 'action'
         data['task_id'] = task_id
         data['state_id'] = action_idx
+        data['data_path'] = data_path
         return data
 
-    def get_world_model_data(self, action_idx, action_sum, orig_actions, trj, task_name, task_id):
+    def get_world_model_data(self, action_idx, action_sum, orig_actions, trj, task_name, task_id, task_name_readable, data_path):
         his = self.config["world_model"]["his"]
         if action_idx>action_sum-his-1:
             return None
@@ -124,9 +220,11 @@ class LiberoFinetuneConversation(Dataset):
         data['image_idx'] = historical_images_idx+future_images_idx
         data['action_ids'] = historical_images_idx
         data['task_name'] = task_name
+        data['task_name_readable'] = task_name_readable
         data['trj'] = trj
         data['task_type'] = 'world'
         data['task_id'] = task_id
+        data['data_path'] = data_path
         return data
 
     def __len__(self):
@@ -135,10 +233,8 @@ class LiberoFinetuneConversation(Dataset):
     def __getitem__(self, idx):
         action_ids = self.data_list[idx]['action_ids']
         trj = self.data_list[idx]['trj']
-        task_id = self.data_list[idx]['task_id']
-        task = self.task_suite.get_task(task_id)
-        task_name_readable = task.name.replace('_', ' ')
-        orig_data_path = os.path.join(self.config["META"]["raw_data_dir"], f"{task.name}_demo.hdf5")
+        task_name_readable = self.data_list[idx]['task_name_readable']
+        orig_data_path = self.data_list[idx]['data_path']
         orig_data_file = h5py.File(orig_data_path, "r")
         orig_data = orig_data_file["data"]
         demo_data = orig_data[f"demo_{trj}"]
