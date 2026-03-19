@@ -30,7 +30,13 @@ def parse_args() -> argparse.Namespace:
         "--device",
         type=str,
         default="cuda:0",
-        help="Target device, for example cuda:0 or cpu.",
+        help="Target device for single-device inference or input placement. Use --device_map auto for multi-GPU.",
+    )
+    parser.add_argument(
+        "--device_map",
+        type=str,
+        default="",
+        help='Optional Hugging Face device_map. Use "auto" to shard across visible GPUs.',
     )
     parser.add_argument(
         "--attn_implementation",
@@ -90,12 +96,13 @@ def main() -> None:
 
     metadata = load_metadata(checkpoint_dir)
     dtype = to_torch_dtype(args.dtype)
+    model_device_map = args.device_map if args.device_map else {"": args.device}
 
     model = Qwen3VLActionHeadForConditionalGeneration.from_checkpoint(
         checkpoint_dir=str(checkpoint_dir),
         dtype=dtype,
         attn_implementation=args.attn_implementation,
-        device_map={"": args.device},
+        device_map=model_device_map,
     )
     model.eval()
 
