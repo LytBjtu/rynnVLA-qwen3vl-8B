@@ -119,9 +119,16 @@ class DistributedBatchSampler(DistributedSampler):
 
     def __iter__(self):
         global_batch_indices = self._get_global_batch_indices()
+        use_length_aware_partition = getattr(self.dataset, "length", None) is not None
         for i in range(0, self.num_batches):
             for j in range(self.gradient_accumulation_steps):
                 if i * self.gradient_accumulation_steps + j < self.num_skipped_batches:
+                    continue
+                local_micro_batch = global_batch_indices[self.rank][i][
+                    j * self.micro_batch_size : (j + 1) * self.micro_batch_size
+                ]
+                if not use_length_aware_partition:
+                    yield local_micro_batch
                     continue
                 all_sample_indices = sum(
                     [
