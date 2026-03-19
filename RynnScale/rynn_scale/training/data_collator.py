@@ -40,6 +40,11 @@ class DataCollator(object):
             extra_inputs[key] = torch.stack(values, dim=0)
         return extra_inputs
 
+    def _normalize_sequence_tensor(self, tensor: torch.Tensor) -> torch.Tensor:
+        if tensor.ndim >= 2 and tensor.size(0) == 1:
+            return tensor.squeeze(0)
+        return tensor
+
     def _collate_fn_packing(self, instances):
         input_ids, position_ids, labels = [], [], []
 
@@ -47,16 +52,20 @@ class DataCollator(object):
         max_length = 0
 
         for instance in instances:
-            input_ids.append(instance["input_ids"])
+            instance_input_ids = self._normalize_sequence_tensor(instance["input_ids"])
+            input_ids.append(instance_input_ids)
             if "position_ids" in instance:
-                position_ids.append(instance["position_ids"])
+                instance_position_ids = instance["position_ids"]
+                if instance_position_ids.ndim >= 2 and instance_position_ids.size(1) == 1:
+                    instance_position_ids = instance_position_ids.squeeze(1)
+                position_ids.append(instance_position_ids)
             else:
-                position_ids.append(torch.arange(instance["input_ids"].size(-1)).unsqueeze(0))
-            tmp_labels = instance["labels"].clone()
+                position_ids.append(torch.arange(instance_input_ids.size(-1)).unsqueeze(0))
+            tmp_labels = self._normalize_sequence_tensor(instance["labels"]).clone()
             tmp_labels[..., 0] = -100
             labels.append(tmp_labels)
 
-            seq_len = instance["input_ids"].size(-1)
+            seq_len = instance_input_ids.size(-1)
             cu_seq_lens.append(cu_seq_lens[-1] + seq_len)
             max_length = max(max_length, seq_len)
 
@@ -85,12 +94,12 @@ class DataCollator(object):
 
     def _collate_fn_padding(self, instances):
         input_ids = torch.nn.utils.rnn.pad_sequence(
-            [instance["input_ids"] for instance in instances],
+            [self._normalize_sequence_tensor(instance["input_ids"]) for instance in instances],
             batch_first=True,
             padding_value=self.processor.tokenizer.pad_token_id,
         )
         labels = torch.nn.utils.rnn.pad_sequence(
-            [instance["labels"] for instance in instances],
+            [self._normalize_sequence_tensor(instance["labels"]) for instance in instances],
             batch_first=True,
             padding_value=self.processor.tokenizer.pad_token_id,
         )
@@ -111,9 +120,10 @@ class DataCollator(object):
             position_ids = torch.ones_like(input_ids)
 
         for i, instance in enumerate(instances):
-            seq_len = instance["input_ids"].size(-1)
+            instance_input_ids = self._normalize_sequence_tensor(instance["input_ids"])
+            seq_len = instance_input_ids.size(-1)
             if "attention_mask" in instance:
-                attention_mask[i, :seq_len] = instance["attention_mask"]
+                attention_mask[i, :seq_len] = self._normalize_sequence_tensor(instance["attention_mask"])
             else:
                 attention_mask[i, :seq_len] = 1
 
