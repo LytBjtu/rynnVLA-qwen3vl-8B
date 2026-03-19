@@ -35,7 +35,7 @@ echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES}"
 MODEL_PATH=${MODEL_PATH:-${REPO_ROOT}/RynnBrain-8B}
 DATA_PATH=${DATA_PATH:-${REPO_ROOT}/work_dirs/llava_sample/train.jsonl}
 OUTPUT_DIR=${OUTPUT_DIR:-${REPO_ROOT}/work_dirs/vla_action_head_8b}
-DEEPSPEED_CONFIG=${DEEPSPEED_CONFIG:-${REPO_ROOT}/configs/zero2.json}
+DEEPSPEED_CONFIG=${DEEPSPEED_CONFIG:-${REPO_ROOT}/configs/zero3.json}
 
 MODEL_ARGS=(
     --model_path "${MODEL_PATH}"

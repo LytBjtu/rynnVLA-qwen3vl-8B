@@ -279,6 +279,33 @@ def _init_empty_params():
         restore_patch(torch.nn.Module)
 
 
+def _materialize_meta_submodule(
+    model: PreTrainedModel,
+    module_name: str,
+    device: torch.device,
+):
+    try:
+        module = model.get_submodule(module_name)
+    except AttributeError:
+        return
+
+    params_and_buffers = list(module.parameters(recurse=True)) + list(module.buffers(recurse=True))
+    if not params_and_buffers or not any(tensor.is_meta for tensor in params_and_buffers):
+        return
+
+    if not all(tensor.is_meta for tensor in params_and_buffers):
+        raise RuntimeError(
+            f"Cannot materialize partially loaded submodule `{module_name}` because it mixes meta and real tensors."
+        )
+
+    module.to_empty(device=device)
+    for submodule in module.modules():
+        if hasattr(model, "_initialize_weights"):
+            model._initialize_weights(submodule)
+        elif hasattr(submodule, "reset_parameters"):
+            submodule.reset_parameters()
+
+
 def _load_pretrained_weights(
     model: PreTrainedModel,
     pretrained_model_name_or_path: str,
@@ -328,13 +355,22 @@ def _load_pretrained_weights(
             if embedding_key not in original_keys:
                 state_dict.pop(embedding_key)
     else:
+        recv_expert_params = mpu.get_expert_model_parallel_world_size() > 1 and mpu.get_expert_data_parallel_rank() == 0
         state_dict = {
-            key: torch.empty_like(tensor, device="cuda")
+            key: torch.empty_like(
+                tensor,
+                device="cuda" if recv_expert_params and key in expert_param_tags else "cpu",
+            )
             for key, tensor in model.state_dict(**state_dict_args).items()
             if key in keys_to_load
         }
-        if mpu.get_expert_data_parallel_rank() == 0:
+        if recv_expert_params:
             _recv_expert_params(expert_param_tags, state_dict)
+
+    state_dict = {
+        key: tensor.cpu() if isinstance(tensor, torch.Tensor) and tensor.is_cuda else tensor
+        for key, tensor in state_dict.items()
+    }
 
     state_dict_args = {"strict": strict and not ignore_missing_prefixes, "assign": True}
     if "convert" in inspect.signature(model.load_state_dict).parameters:
@@ -353,13 +389,13 @@ def _load_pretrained_weights(
                 f"Failed to load checkpoint from '{pretrained_model_name_or_path}'. "
                 f"missing keys: {missing_keys}, unexpected keys: {unexpected_keys}"
             )
+        for prefix in ignore_missing_prefixes:
+            _materialize_meta_submodule(model, prefix, device=torch.device("cpu"))
     logger.info(
         f"Loaded checkpoint from '{pretrained_model_name_or_path}', "
         f"missing keys: {incompatible_keys.missing_keys}, "
         f"unexpected keys: {incompatible_keys.unexpected_keys}"
     )
-
-    model.to("cuda")
 
     if tie_word_embeddings:
         model.tie_weights()
