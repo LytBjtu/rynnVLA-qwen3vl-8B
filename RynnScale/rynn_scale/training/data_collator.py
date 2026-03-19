@@ -96,7 +96,20 @@ class DataCollator(object):
         )
 
         attention_mask = torch.zeros_like(input_ids)
-        position_ids = torch.ones_like(input_ids)
+        use_multirope_position_ids = any(
+            "position_ids" in instance and instance["position_ids"].ndim >= 2 for instance in instances
+        )
+        if use_multirope_position_ids:
+            first_position_ids = next(instance["position_ids"] for instance in instances if "position_ids" in instance)
+            num_position_channels = first_position_ids.shape[0] if first_position_ids.ndim >= 2 else 1
+            position_ids = torch.ones(
+                (num_position_channels, len(instances), input_ids.size(1)),
+                dtype=input_ids.dtype,
+                device=input_ids.device,
+            )
+        else:
+            position_ids = torch.ones_like(input_ids)
+
         for i, instance in enumerate(instances):
             seq_len = instance["input_ids"].size(-1)
             if "attention_mask" in instance:
@@ -105,9 +118,25 @@ class DataCollator(object):
                 attention_mask[i, :seq_len] = 1
 
             if "position_ids" in instance:
-                position_ids[i, :seq_len] = instance["position_ids"]
+                instance_position_ids = instance["position_ids"]
+                if use_multirope_position_ids:
+                    if instance_position_ids.ndim == 3:
+                        if instance_position_ids.size(1) != 1:
+                            raise ValueError(
+                                f"Unsupported position_ids shape: {tuple(instance_position_ids.shape)}"
+                            )
+                        instance_position_ids = instance_position_ids.squeeze(1)
+                    elif instance_position_ids.ndim == 1:
+                        instance_position_ids = instance_position_ids.unsqueeze(0).expand(position_ids.size(0), -1)
+                    position_ids[:, i, :seq_len] = instance_position_ids
+                else:
+                    position_ids[i, :seq_len] = instance_position_ids
             else:
-                position_ids[i, :seq_len] = torch.arange(seq_len)
+                default_position_ids = torch.arange(seq_len, device=input_ids.device, dtype=input_ids.dtype)
+                if use_multirope_position_ids:
+                    position_ids[:, i, :seq_len] = default_position_ids.unsqueeze(0).expand(position_ids.size(0), -1)
+                else:
+                    position_ids[i, :seq_len] = default_position_ids
 
         batch = {
             "data_indices": [instance["data_index"] for instance in instances],
